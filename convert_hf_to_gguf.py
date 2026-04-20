@@ -2955,6 +2955,13 @@ class LlamaModel(TextModel):
             else:
                 return
 
+        if self.origin_hf_arch.startswith('Sarashina2VisionForCausalLM'):
+            # Remove llm. from name 
+            if name.startswith("llm."):
+                name = name[len("llm."):]
+            elif name.startswith("visual.") or name in ("norm.weight", "norm.bias"):
+                return  #Skip processing "modify_tensors"
+
         yield from super().modify_tensors(data_torch, name, bid)
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
@@ -4210,6 +4217,8 @@ class Qwen2VLVisionModel(MmprojModel):
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
         hparams = self.hparams_vision
+        if "sarashina2_vision" in self.global_config['model_type']:
+            self.global_config['model_type'] = "qwen2_vl"
         model_type = self.global_config['model_type']
         if model_type == 'qwen2_vl':
             self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.QWEN2VL)
@@ -13370,6 +13379,8 @@ def get_model_architecture(hparams: dict[str, Any], model_type: ModelType) -> st
         arch = text_config["architectures"][0]
     elif model_type == ModelType.MMPROJ and vision_config.get("architectures") is not None:
         arch = vision_config["architectures"][0]
+    if "Sarashina" in arch:
+        arch = "Qwen2VLForConditionalGeneration"
     if arch is None:
         raise ValueError("Failed to detect model architecture")
     return arch
