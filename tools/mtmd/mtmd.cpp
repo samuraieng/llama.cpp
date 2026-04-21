@@ -1250,9 +1250,9 @@ mtmd_decoder_pos mtmd_image_tokens_get_decoder_pos(const mtmd_image_tokens * ima
     mtmd_decoder_pos pos;
     // M-RoPE logic
     // TODO: support other types of position encoding if needed
-    pos.t = pos_0;
-    pos.x = pos_0 + (i % image_tokens->nx);
-    pos.y = pos_0 + (i / image_tokens->nx);
+    pos.t = 0;
+    pos.x = i % image_tokens->nx;
+    pos.y = i / image_tokens->nx;
     pos.z = 0; // unused for now
     return pos;
 }

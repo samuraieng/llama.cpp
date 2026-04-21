@@ -4217,12 +4217,13 @@ class Qwen2VLVisionModel(MmprojModel):
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
         hparams = self.hparams_vision
-        if "sarashina2_vision" in self.global_config['model_type']:
-            self.global_config['model_type'] = "qwen2_vl"
         model_type = self.global_config['model_type']
         if model_type == 'sarashina2_vision':
-            model_type = "qwen2_vl"
-        if model_type == 'qwen2_vl':
+            model_type = 'qwen2_vl'
+            self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.QWEN2VL)
+            spatial_merge_size = self.hparams.get("spatial_merge_size", 2)
+            self.gguf_writer.add_uint32("clip.vision.spatial_merge_size", spatial_merge_size)
+        elif model_type == 'qwen2_vl':
             self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.QWEN2VL)
         elif model_type == 'qwen2_5_vl' or model_type == 'qwen2_5_omni':
             if model_type == 'qwen2_5_omni':
