@@ -2955,6 +2955,13 @@ class LlamaModel(TextModel):
             else:
                 return
 
+        if self.origin_hf_arch.startswith('Sarashina2VisionForCausalLM'):
+            # Remove llm. from name 
+            if name.startswith("llm."):
+                name = name[len("llm."):]
+            elif name.startswith("visual.") or name in ("norm.weight", "norm.bias"):
+                return  #Skip processing "modify_tensors"
+
         yield from super().modify_tensors(data_torch, name, bid)
 
     def generate_extra_tensors(self) -> Iterable[tuple[str, Tensor]]:
@@ -4210,6 +4217,8 @@ class Qwen2VLVisionModel(MmprojModel):
         super().set_gguf_parameters()
         assert self.hparams_vision is not None
         hparams = self.hparams_vision
+        if "sarashina2_vision" in self.global_config['model_type']:
+            self.global_config['model_type'] = "qwen2_vl"
         model_type = self.global_config['model_type']
         if model_type == 'sarashina2_vision':
             model_type = "qwen2_vl"
