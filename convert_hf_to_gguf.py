@@ -13377,14 +13377,14 @@ class DotsOCRVisionModel(MmprojModel):
 class Sarashina2VLTextModel(LlamaModel):
     model_arch = gguf.MODEL_ARCH.LLAMA
 
-    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
+    @classmethod
+    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
+        name, gen = item
         if name.startswith("llm."):
             name = name.replace("llm.", "", 1)
-        elif name.startswith("norm.") or name.startswith("visual."):
-            return
-
-        yield from super().modify_tensors(data_torch, name, bid)
-
+        elif name.startswith("norm."):
+            return None
+        return super().filter_tensors((name, gen))
 
 @ModelBase.register("Sarashina2VisionForCausalLM")
 class Sarashina2VLVisionModel(Qwen2VLVisionModel):
