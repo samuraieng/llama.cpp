@@ -1064,7 +1064,7 @@ class TextModel(ModelBase):
 
         # Skip multimodal tensors
         if name.startswith(("mlp", "vit.", "vpm.", "siglip2.", "conformer.", "merger.", "resampler.", "sound_encoder.", "sound_projection.")) \
-                or "visual." in name or "vision." in name or "audio." in name or "talker." in name \
+                or "visual." in name or "audio." in name or "talker." in name \
                 or "vision_" in name or "audio_" in name or "sam_model" in name \
                 or "token2wav." in name or "code2wav." in name \
                 or "projector." in name or "pre_mm_projector_norm" in name \
@@ -1360,9 +1360,6 @@ class TextModel(ModelBase):
         if chkhsh == "d4540891389ea895b53b399da6ac824becc30f2fba0e9ddbb98f92e55ca0e97c":
             # ref: https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
             res = "qwen2"
-        if chkhsh == "1444df51289cfa8063b96f0e62b1125440111bc79a52003ea14b6eac7016fd5f":
-            # ref: https://huggingface.co/openbmb/MiniCPM-V-4_6
-            res = "qwen35"
         if chkhsh == "66b8d4e19ab16c3bfd89bce5d785fb7e0155e8648708a1f42077cb9fe002c273":
             # ref: https://huggingface.co/alvarobartt/grok-2-tokenizer
             res = "grok-2"
@@ -5502,99 +5499,14 @@ class _LinearAttentionVReorderBase(Qwen3NextModel):
         yield from super().modify_tensors(data_torch, name, bid)
 
 
-class _Qwen35MRopeMixin:
-    # Qwen3.5 always applies interleaved MRoPE (see Qwen3_5RotaryEmbedding in transformers);
-    # the upstream default mrope_section is [11, 11, 10] and llama.cpp's QWEN35 / QWEN35MOE
-    # loaders treat qwen35.rope.dimension_sections as required, so make sure it is always
-    # written even when a particular checkpoint omits the field in `rope_parameters`.
-    _QWEN35_DEFAULT_MROPE_SECTION = [11, 11, 10, 0]
-
-    gguf_writer: gguf.GGUFWriter
-    rope_parameters: dict
-
-    def set_gguf_parameters(self):
-        super().set_gguf_parameters()  # ty: ignore[unresolved-attribute]
-        if "mrope_section" not in self.rope_parameters:
-            self.gguf_writer.add_rope_dimension_sections(self._QWEN35_DEFAULT_MROPE_SECTION)
-
-
 @ModelBase.register("Qwen3_5ForConditionalGeneration", "Qwen3_5ForCausalLM")
-class Qwen3_5TextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
+class Qwen3_5TextModel(_LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35
 
 
 @ModelBase.register("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
-class Qwen3_5MoeTextModel(_Qwen35MRopeMixin, _LinearAttentionVReorderBase):
+class Qwen3_5MoeTextModel(_LinearAttentionVReorderBase):
     model_arch = gguf.MODEL_ARCH.QWEN35MOE
-
-
-# MiniCPM-V 4.6: text tower is Qwen3.5 (linear+full hybrid attention) wrapped under
-# `model.language_model.*`; vision tower is SigLIP + a window-attention ViT merger
-# + a final DownsampleMLP merger. The same HF arch is registered twice below: once as
-# the LM (text mode) and once as the mmproj (vision mode), mirroring the Qwen3-VL setup.
-
-@ModelBase.register("MiniCPMV4_6ForConditionalGeneration")
-class MiniCPMV4_6TextModel(Qwen3_5TextModel):
-    model_arch = gguf.MODEL_ARCH.QWEN35
-
-    @classmethod
-    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
-
-        if name.startswith("model.merger."):
-            return None
-        # MTP tensors are not used at inference yet; align with Qwen3Next behaviour
-        if name.startswith("mtp"):
-            return None
-
-        return super().filter_tensors(item)
-
-
-@ModelBase.register("MiniCPMV4_6ForConditionalGeneration")
-class MiniCPMV4_6VisionModel(MmprojModel):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if self.hparams_vision is not None:
-            # In MiniCPM-V 4.6 `vision_config.image_size` (980) describes the SigLIP
-            # positional embedding bucket grid (70 x 70), while the per-slice processing
-            # resolution is the preprocessor's `scale_resolution` (typically 448).
-            # The CLIP loader in tools/mtmd/clip.cpp consumes `clip.vision.image_size`
-            # as the slice size and warmup resolution, so report `scale_resolution` there
-            # to match the upstream MiniCPMV4_6ImageProcessorPil slicing rules.
-            scale_resolution = self.preprocessor_config.get("scale_resolution")
-            if scale_resolution is not None:
-                self.hparams_vision["image_size"] = int(scale_resolution)
-
-    def set_gguf_parameters(self):
-        super().set_gguf_parameters()
-        assert self.hparams_vision is not None
-
-        # projector type string is consumed by clip_projector_type_from_string() in clip.cpp
-        # (mapped to PROJECTOR_TYPE_MINICPMV4_6).
-        self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.MINICPMV4_6)
-
-        # ViT merger 2x2 + final merger 2x2 = 4x spatial merge per dimension; used for slice alignment
-        self.gguf_writer.add_vision_projector_scale_factor(4)
-
-        # borrow wa_layer_indexes for vit_merger insertion point
-        insert_layer_id = int(self.global_config.get(
-            "insert_layer_id", self.hparams_vision.get("insert_layer_id", 6)))
-        self.gguf_writer.add_vision_wa_layer_indexes([insert_layer_id])
-
-        # SigLIP vision body uses gelu_pytorch_tanh, which matches ggml_gelu (tanh approx).
-        self.gguf_writer.add_vision_use_gelu(True)
-        self.gguf_writer.add_vision_attention_layernorm_eps(
-            self.hparams_vision.get("layer_norm_eps", 1e-6))
-
-    @classmethod
-    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
-
-        # lm_head / MTP -> belong to the LM file
-        if name.startswith(("lm_head.", "mtp")):
-            return None
-
-        return super().filter_tensors(item)
 
 
 @ModelBase.register("GPT2LMHeadModel")
@@ -10783,7 +10695,7 @@ class ExaoneMoEModel(Exaone4Model):
                 raise ValueError(f"Unprocessed experts: {experts}")
 
 
-@ModelBase.register("GraniteForCausalLM", "GraniteSpeechForConditionalGeneration")
+@ModelBase.register("GraniteForCausalLM")
 class GraniteModel(LlamaModel):
     """Conversion for IBM's GraniteForCausalLM"""
     model_arch = gguf.MODEL_ARCH.GRANITE
@@ -10815,13 +10727,6 @@ class GraniteModel(LlamaModel):
         if logits_scale := self.hparams.get("logits_scaling"):
             self.gguf_writer.add_logit_scale(logits_scale)
             logger.info("gguf: (granite) logits_scale = %s", logits_scale)
-
-    @classmethod
-    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
-        if name.startswith("encoder."):
-            return None
-        return super().filter_tensors(item)
 
 
 @ModelBase.register("GraniteMoeForCausalLM", "GraniteMoeSharedForCausalLM")
@@ -12676,89 +12581,6 @@ class LFM2AudioModel(ConformerAudioModel):
         return super().filter_tensors(item)
 
 
-@ModelBase.register("GraniteSpeechForConditionalGeneration")
-class GraniteSpeechMmprojModel(MmprojModel):
-    has_vision_encoder = False
-    has_audio_encoder = True
-
-    _batch_norm_tensors: list[dict[str, Tensor]] | None = None
-
-    def get_audio_config(self) -> dict[str, Any] | None:
-        return self.global_config.get("encoder_config")
-
-    def set_gguf_parameters(self):
-        assert self.hparams_audio is not None
-        a = self.hparams_audio
-        a["hidden_size"] = a["hidden_dim"]
-        a["intermediate_size"] = a["hidden_dim"] * a["feedforward_mult"]
-        a["num_attention_heads"] = a["num_heads"]
-        a["num_hidden_layers"] = a["num_layers"]
-
-        super().set_gguf_parameters()
-
-        self.gguf_writer.add_clip_projector_type(gguf.VisionProjectorType.GRANITE_SPEECH)
-        self.gguf_writer.add_audio_num_mel_bins(a["input_dim"])
-        self.gguf_writer.add_audio_attention_layernorm_eps(1e-5)
-        self.gguf_writer.add_audio_chunk_size(a["context_size"])
-        self.gguf_writer.add_audio_conv_kernel_size(a["conv_kernel_size"])
-        self.gguf_writer.add_audio_max_pos_emb(a["max_pos_emb"])
-
-        p = self.global_config
-        self.gguf_writer.add_audio_projector_window_size(p["window_size"])
-        self.gguf_writer.add_audio_projector_downsample_rate(p["downsample_rate"])
-        self.gguf_writer.add_audio_projector_head_count(p["projector_config"]["num_attention_heads"])
-
-    def tensor_force_quant(self, name, new_name, bid, n_dims):
-        if "encoder" in name or "projector" in name:
-            if ".conv" in name and ".weight" in name:
-                return gguf.GGMLQuantizationType.F32
-        return super().tensor_force_quant(name, new_name, bid, n_dims)
-
-    @classmethod
-    def filter_tensors(cls, item: tuple[str, Callable[[], Tensor]]) -> tuple[str, Callable[[], Tensor]] | None:
-        name, gen = item
-        if "attention_dists" in name or "num_batches_tracked" in name:
-            return None
-        return super().filter_tensors(item)
-
-    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        # fold running_mean, running_var and eps into weight and bias for batch_norm
-        if "batch_norm" in name and "encoder.layers." in name:
-            if self._batch_norm_tensors is None:
-                self._batch_norm_tensors = [{} for _ in range(self.block_count)]
-            assert bid is not None
-            self._batch_norm_tensors[bid][name] = data_torch
-            if len(self._batch_norm_tensors[bid]) < 4:
-                return
-            prefix = f"encoder.layers.{bid}.conv.batch_norm"
-            weight = self._batch_norm_tensors[bid][f"{prefix}.weight"]
-            bias = self._batch_norm_tensors[bid][f"{prefix}.bias"]
-            running_mean = self._batch_norm_tensors[bid][f"{prefix}.running_mean"]
-            running_var = self._batch_norm_tensors[bid][f"{prefix}.running_var"]
-            eps = 1e-5
-            a = weight / torch.sqrt(running_var + eps)
-            b = bias - running_mean * a
-            yield from super().modify_tensors(a, f"encoder.layers.{bid}.conv.batch_norm.weight", bid)
-            yield from super().modify_tensors(b, f"encoder.layers.{bid}.conv.batch_norm.bias", bid)
-            return
-
-        if ".attn.to_kv.weight" in name:
-            k_weight, v_weight = data_torch.chunk(2, dim=0)
-            yield from super().modify_tensors(k_weight, name.replace("to_kv", "to_k"), bid)
-            yield from super().modify_tensors(v_weight, name.replace("to_kv", "to_v"), bid)
-            return
-
-        if ("up_conv" in name or "down_conv" in name) and name.endswith(".weight"):
-            if data_torch.ndim == 3 and data_torch.shape[2] == 1:
-                data_torch = data_torch.squeeze(2)
-
-        if "depth_conv" in name and name.endswith(".weight"):
-            if data_torch.ndim == 3 and data_torch.shape[1] == 1:
-                data_torch = data_torch.squeeze(1)
-
-        yield from super().modify_tensors(data_torch, name, bid)
-
-
 @ModelBase.register("Lfm25AudioTokenizer")
 class LFM25AudioTokenizer(LFM2Model):
     model_arch = gguf.MODEL_ARCH.LFM2
@@ -13551,6 +13373,26 @@ class DotsOCRVisionModel(MmprojModel):
         yield from super().modify_tensors(data_torch, name, bid)
 
 
+@ModelBase.register("Sarashina2VisionForCausalLM")
+class Sarashina2VLTextModel(LlamaModel):
+    model_arch = gguf.MODEL_ARCH.LLAMA
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None):
+        if name.startswith("llm."):
+            name = name.replace("llm.", "", 1)
+        elif name.startswith("norm.") or name.startswith("visual."):
+            return
+
+        yield from super().modify_tensors(data_torch, name, bid)
+
+
+@ModelBase.register("Sarashina2VisionForCausalLM")
+class Sarashina2VLVisionModel(Qwen2VLVisionModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.global_config['model_type'] = "qwen2_vl"
+
+
 ###### CONVERSION LOGIC ######
 
 
@@ -13807,7 +13649,7 @@ def get_model_architecture(hparams: dict[str, Any], model_type: ModelType) -> st
     # Step3-VL keeps text config under text_config but uses a custom top-level architecture.
     # For text conversion we route to a dedicated text-only class.
     # TODO: refactor this later to avoid adding exception here
-    if model_type == ModelType.TEXT and arch == "StepVLForConditionalGeneration":
+    if model_type == ModelType.TEXT and arch in ("StepVLForConditionalGeneration", "Sarashina2VisionForCausalLM"):
         return arch
 
     # if "architectures" is found in the sub-config, use that instead
